@@ -1,190 +1,163 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Iterable, List, Optional, Union, Tuple
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import plotly.io as pio
 
-# Affichage dans le navigateur (VS Code/Windows friendly)
+# Ouvre dans le navigateur (VS Code friendly)
 pio.renderers.default = "browser"
 
-# -----------------------------------------------------
-# Chargement utilitaire
-# -----------------------------------------------------
 PathLike = Union[str, Path]
 
+# -----------------------------------------------------
+# Chargement utilitaires
+# -----------------------------------------------------
 
-def _to_paths(items: Iterable[PathLike]) -> List[Path]:
+def _paths(items: Iterable[PathLike]) -> List[Path]:
     return [Path(p).expanduser().resolve() for p in items]
 
 
 def load_csv(path: PathLike) -> pd.DataFrame:
-    path = Path(path).expanduser().resolve()
-    df = pd.read_csv(path)
-    # Sécurité types
+    p = Path(path).expanduser().resolve()
+    df = pd.read_csv(p)
     if 'time_s' in df.columns:
         df['time_s'] = pd.to_numeric(df['time_s'], errors='coerce')
-    if 'scenario' in df.columns and df['scenario'].dtype != 'object':
-        df['scenario'] = df['scenario'].astype(str)
+    if 'scenario' not in df.columns:
+        df['scenario'] = p.stem.replace('flowline_', '')
     return df
 
 
-def load_many(paths: Iterable[PathLike]) -> pd.DataFrame:
-    dfs = []
-    for p in _to_paths(paths):
-        df = load_csv(p)
-        if 'scenario' not in df.columns:
-            # inférer depuis le nom de fichier
-            df['scenario'] = p.stem.replace('flowline_', '')
-        dfs.append(df)
-    return pd.concat(dfs, ignore_index=True)
+def list_runs(data_dir: PathLike) -> List[Path]:
+    d = Path(data_dir).expanduser().resolve()
+    if not d.exists():
+        return []
+    # prioriser nominal / variations / puis banque aléatoire
+    names = [
+        'flowline_nominal.csv', 'flowline_m2_slow.csv',
+        'flowline_m3_setup.csv', 'flowline_m1_quality_drop.csv'
+    ]
+    ordered: List[Path] = [p for p in (d / n for n in names) if p.exists()]
+    ordered += sorted(d.glob('flowline_rand_*.csv'))
+    if (d / 'flowline_piecewise_bank.csv').exists():
+        ordered.append(d / 'flowline_piecewise_bank.csv')
+    return ordered
 
 
 # -----------------------------------------------------
-# Plots de base par scénario
+# Plots multi-trajectoires
 # -----------------------------------------------------
 
-def plot_buffers(df: pd.DataFrame, title: Optional[str] = None, downsample: int = 1):
-    """Trace xA, xB, xC sur le temps pour un scénario.
-    downsample: prendre 1 point sur N pour accélérer l'affichage.
-    """
-    d = df.iloc[::max(1, int(downsample))].copy()
-    name = title or (str(d.get('scenario', [''])[0]) or 'buffers')
-
+def plot_3d_buffers(paths: Iterable[PathLike], labels: Optional[List[str]] = None, downsample: int = 1):
+    """Trace xA-xB-xC en 3D pour plusieurs fichiers CSV."""
+    pts = _paths(paths)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['xA'], mode='lines', name='xA'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['xB'], mode='lines', name='xB'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['xC'], mode='lines', name='xC'))
+    pal = px.colors.qualitative.Plotly
+    for j, p in enumerate(pts):
+        d = load_csv(p)
+        d = d.iloc[::max(1, downsample)]
+        name = labels[j] if labels and j < len(labels) else p.stem.replace('flowline_', '')
+        fig.add_trace(go.Scatter3d(
+            x=d['xA'], y=d['xB'], z=d['xC'], mode='lines',
+            name=name, line=dict(width=4, color=pal[j % len(pal)])
+        ))
     fig.update_layout(
-        title=title or f"Buffers (xA,xB,xC) — {name}",
-        xaxis_title='Temps (s)', yaxis_title='Pièces',
-        template='plotly_white', legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
-    )
-    fig.show()
-
-
-def plot_flows(df: pd.DataFrame, title: Optional[str] = None, downsample: int = 1):
-    d = df.iloc[::max(1, int(downsample))].copy()
-    name = title or (str(d.get('scenario', [''])[0]) or 'flows')
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['s1_out'], mode='lines', name='s1_out'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['s2_out'], mode='lines', name='s2_out'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['s3_out'], mode='lines', name='s3_out'))
-    fig.update_layout(
-        title=title or f"Débits (s1,s2,s3) — {name}",
-        xaxis_title='Temps (s)', yaxis_title='Pièces/s',
-        template='plotly_white', legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
-    )
-    fig.show()
-
-
-def plot_counters(df: pd.DataFrame, title: Optional[str] = None, downsample: int = 1):
-    d = df.iloc[::max(1, int(downsample))].copy()
-    name = title or (str(d.get('scenario', [''])[0]) or 'counters')
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['n1_out_cum'], mode='lines', name='n1_out_cum'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['n2_out_cum'], mode='lines', name='n2_out_cum'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['n3_out_cum'], mode='lines', name='n3_out_cum'))
-    fig.update_layout(
-        title=title or f"Compteurs cumulés — {name}",
-        xaxis_title='Temps (s)', yaxis_title='Pièces cumulées',
-        template='plotly_white', legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
-    )
-    fig.show()
-
-
-# -----------------------------------------------------
-# Overlays multi-scénarios
-# -----------------------------------------------------
-
-def plot_throughput_overlay(paths: Iterable[PathLike] | pd.DataFrame, downsample: int = 1):
-    """Superpose s3_out pour plusieurs scénarios.
-    Accepte soit une liste de chemins CSV, soit un DataFrame combiné avec colonne 'scenario'.
-    """
-    if isinstance(paths, pd.DataFrame):
-        data = paths.copy()
-    else:
-        data = load_many(paths)
-
-    data = data.iloc[::max(1, int(downsample))]
-    fig = go.Figure()
-    for scen, d in data.groupby('scenario'):
-        fig.add_trace(go.Scatter(x=d['time_s'], y=d['s3_out'], mode='lines', name=f"{scen}"))
-    fig.update_layout(
-        title='Débit de sortie s3_out — comparaison scénarios',
-        xaxis_title='Temps (s)', yaxis_title='Pièces/s', template='plotly_white',
+        title='Trajectoires 3D — buffers (xA, xB, xC)', template='plotly_white',
+        scene=dict(xaxis_title='xA', yaxis_title='xB', zaxis_title='xC', aspectmode='cube'),
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
     )
     fig.show()
 
 
-def plot_buffers_overlay(paths: Iterable[PathLike] | pd.DataFrame, buffer_name: str = 'xC', downsample: int = 1):
-    """Overlay d'un buffer (xA/xB/xC) sur plusieurs scénarios."""
-    assert buffer_name in {'xA','xB','xC'}
-    if isinstance(paths, pd.DataFrame):
-        data = paths.copy()
-    else:
-        data = load_many(paths)
-
-    data = data.iloc[::max(1, int(downsample))]
+def plot_overlay(paths: Iterable[PathLike], column: str, title: Optional[str] = None, downsample: int = 1):
+    """Superpose une colonne (ex: 'xC' ou 's3_out') sur plusieurs fichiers."""
+    pts = _paths(paths)
     fig = go.Figure()
-    for scen, d in data.groupby('scenario'):
-        fig.add_trace(go.Scatter(x=d['time_s'], y=d[buffer_name], mode='lines', name=f"{scen}"))
+    pal = px.colors.qualitative.Plotly
+    for j, p in enumerate(pts):
+        d = load_csv(p)
+        if column not in d.columns:
+            raise ValueError(f"Colonne '{column}' absente dans {p.name}")
+        d = d.iloc[::max(1, downsample)]
+        name = p.stem.replace('flowline_', '')
+        fig.add_trace(go.Scatter(x=d['time_s'], y=d[column], mode='lines',
+                                 name=name, line=dict(color=pal[j % len(pal)])))
     fig.update_layout(
-        title=f'{buffer_name} — comparaison scénarios',
-        xaxis_title='Temps (s)', yaxis_title='Pièces', template='plotly_white',
+        title=title or f"Overlay — {column}", template='plotly_white',
+        xaxis_title='Temps (s)', yaxis_title=column,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
     )
-    return fig.show()
-
-
-# -----------------------------------------------------
-# Diagnostics fusion (optionnel)
-# -----------------------------------------------------
-
-def plot_merge_weights(df: pd.DataFrame, title: Optional[str] = None, downsample: int = 1):
-    if not {'wA','wB'}.issubset(df.columns):
-        raise ValueError("Colonnes wA/wB absentes. Regénère les CSV avec diagnostics.")
-    d = df.iloc[::max(1, int(downsample))]
-    name = title or d.get('scenario', [''])[0]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['wA'], mode='lines', name='wA'))
-    fig.add_trace(go.Scatter(x=d['time_s'], y=d['wB'], mode='lines', name='wB'))
-    fig.update_layout(title=title or f'Poids de tirage (wA/wB) — {name}',
-                      xaxis_title='Temps (s)', yaxis_title='Poids', template='plotly_white',
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0))
     fig.show()
 
 
+def plot_params(paths: Iterable[PathLike], params: List[str] = ['nu1','nu2','nu3','a1','a2','a3'], downsample: int = 1):
+    """Petit tableau de paramètres (en 2 lignes) superposés par trajectoire."""
+    pts = _paths(paths)
+    pal = px.colors.qualitative.Plotly
+    # deux figures empilées pour ne pas surcharger
+    top, bottom = params[:len(params)//2], params[len(params)//2:]
+    for group, title in [(top, 'Paramètres (groupe 1)'), (bottom, 'Paramètres (groupe 2)')]:
+        if not group:
+            continue
+        fig = go.Figure()
+        for j, p in enumerate(pts):
+            d = load_csv(p).iloc[::max(1, downsample)]
+            name = p.stem.replace('flowline_', '')
+            for param in group:
+                if param not in d.columns:
+                    continue
+                fig.add_trace(go.Scatter(x=d['time_s'], y=d[param], mode='lines',
+                                         name=f"{name} • {param}",
+                                         line=dict(color=pal[j % len(pal)]),
+                                         legendgroup=name, showlegend=True))
+        fig.update_layout(
+            title=title, template='plotly_white',
+            xaxis_title='Temps (s)', yaxis_title='valeur',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0)
+        )
+        fig.show()
+
+
 # -----------------------------------------------------
-# Démo rapide (exécutable)
+# Démo (▶️ Run)
 # -----------------------------------------------------
 if __name__ == '__main__':
-    # Dossier data à côté de ce fichier par défaut
+    # 1) Où écrire / lire
     script_dir = Path(__file__).resolve().parent
-    data_dir = "data"
-    data_dir_path = Path(data_dir).expanduser()
-    data_dir_path.mkdir(parents=True, exist_ok=True)
+    data_dir  = 'data2'
+    OUTPUT_DIR = Path(data_dir).expanduser()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Exemples de chemins
-    p_nom = data_dir_path / 'flowline_nominal.csv'
-    p_m2  = data_dir_path / 'flowline_m2_slow.csv'
-    p_m3  = data_dir_path / 'flowline_m3_setup.csv'
-    p_q1  = data_dir_path / 'flowline_m1_quality_drop.csv'
+    # 2) Choisir quelques trajectoires à comparer
+    runs = list_runs(OUTPUT_DIR)
+    if not runs:
+        print(f"Aucun CSV dans {OUTPUT_DIR}. Lances d'abord le générateur.")
+        raise SystemExit(0)
 
-    # Charger un scénario et tracer
-    if p_nom.exists():
-        df_nom = load_csv(p_nom)
-        plot_buffers(df_nom, title='Nominal')
-        plot_flows(df_nom, title='Nominal')
-        plot_counters(df_nom, title='Nominal')
+    # Exemple: prends 4 fichiers (nominal, m2_slow, m3_setup, et un rand si dispo)
+    chosen: List[Path] = ["flowline_rand_001", "flowline_rand_002", "flowline_rand_003"]
+    for base in ['flowline_nominal.csv','flowline_m2_slow.csv','flowline_m3_setup.csv']:
+        p = OUTPUT_DIR / base
+        if p.exists():
+            chosen.append(p)
+    #ajoute un aléatoire s'il existe
+    rands = [p for p in runs if p.name.startswith('flowline_rand_')]
+    if rands:
+        chosen.append(rands[0])
 
-    # Superposer s3_out sur plusieurs scénarios (si présents)
-    present = [p for p in [p_nom, p_m2, p_m3, p_q1] if p.exists()]
-    if len(present) >= 2:
-        plot_throughput_overlay(present)
-        plot_buffers_overlay(present, buffer_name='xC')
+    #sinon, prends les 3-4 premiers disponibles
+    if len(chosen) < 3:
+        extra = [p for p in runs if p not in chosen][: (4 - len(chosen))]
+        chosen += extra
+
+    print("Comparaison sur:")
+    for p in chosen:
+        print("  -", p.name)
+
+    # 3) Tracés
+    plot_3d_buffers(chosen, downsample=2)
+    plot_overlay(chosen, column='xC', title='Buffer xC — multi-trajectoires', downsample=1)
+    plot_overlay(chosen, column='s3_out', title='Débit s3_out — multi-trajectoires', downsample=1)
+    plot_params(chosen, params=['nu1','nu2','nu3','a1','a2','a3'], downsample=5)
